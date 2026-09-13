@@ -45,6 +45,22 @@ espflash flash --chip esp32 --port /dev/ttyUSB0 --baud 115200 \
   flashing to hardware and reading the serial log or the screen. Do not claim a
   change works without doing so, and say plainly when you could not.
 
+## Auxiliary Python tooling — use `uv`
+
+The Rust build/flash path (espup, espflash, cargo) needs no Python. But some
+useful escape hatches are Python: `esptool` for chip ID, flash dumps, and erase
+(when `espflash` isn't enough), and small `pyserial` scripts for custom serial
+capture. Install and run those with [`uv`](https://docs.astral.sh/uv/), never
+pip or a pyenv:
+
+```sh
+uv tool install esptool          # -> ~/.local/bin/esptool, esptool.py, ...
+uv run --with pyserial script.py # one-off serial scripts, no venv to manage
+```
+
+This is a standing project preference: reach for `uv` for anything Python-based
+rather than a system/pyenv install.
+
 ## Architecture
 
 - `src/lib.rs` — the crate library; pin map plus `pub mod` for every module.
