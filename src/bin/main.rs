@@ -96,6 +96,8 @@ const BG: Rgb565 = Rgb565::new(2, 4, 6);
 const INK: Rgb565 = Rgb565::new(26, 53, 28);
 const DIM: Rgb565 = Rgb565::new(14, 28, 16);
 const HOT: Rgb565 = Rgb565::new(31, 40, 0);
+/// Ring colour once a hold is accepted — the state the on-screen text names.
+const DONE: Rgb565 = Rgb565::new(0, 63, 14);
 const CANVAS_BG: Rgb565 = Rgb565::BLACK;
 
 fn clear_button() -> Rectangle {
@@ -221,10 +223,13 @@ where
 {
     let _ = display.clear(BG);
     let title = MonoTextStyle::new(&FONT_9X15_BOLD, INK);
-    let body = MonoTextStyle::new(&FONT_6X10, DIM);
-    let _ = Text::new("CALIBRATION", Point::new(57, 96), title).draw(display);
-    let _ = Text::new("press the centre of each target", Point::new(24, 120), body).draw(display);
-    let _ = Text::new("and HOLD until it turns yellow", Point::new(27, 134), body).draw(display);
+    let body = MonoTextStyle::new(&FONT_6X10, INK);
+    let loud = MonoTextStyle::new(&FONT_9X15_BOLD, DONE);
+
+    let _ = Text::new("CALIBRATION", Point::new(57, 84), title).draw(display);
+    let _ = Text::new("press and HOLD each target", Point::new(33, 116), body).draw(display);
+    let _ = Text::new("until its ring turns", Point::new(54, 130), body).draw(display);
+    let _ = Text::new("GREEN", Point::new(93, 152), loud).draw(display);
 
     let targets = [
         (Point::new(26, 210), (26i32, 210i32)),
@@ -237,14 +242,14 @@ where
         let mut step: String<8> = String::new();
         let _ = write!(step, "{} of 3", i + 1);
         let _ = display.fill_solid(
-            &Rectangle::new(Point::new(90, 154), Size::new(60, 12)),
+            &Rectangle::new(Point::new(88, 168), Size::new(64, 12)),
             BG,
         );
-        let _ = Text::new(step.as_str(), Point::new(102, 164), body).draw(display);
+        let _ = Text::new(step.as_str(), Point::new(102, 178), body).draw(display);
 
         draw_marker(display, *at, INK);
         raws[i] = hold_to_confirm(display, touch, delay, *at);
-        draw_marker(display, *at, BG);
+        clear_marker(display, *at);
         delay.delay_millis(200);
     }
 
@@ -296,6 +301,8 @@ where
         // Let the contact settle before anything is counted; the first
         // readings of a press are the least trustworthy.
         delay.delay_millis(40);
+        // Amber the moment contact registers, so the press is acknowledged
+        // before the hold has earned anything.
         draw_marker(display, at, HOT);
 
         let (mut sx, mut sy, mut n, mut misses) = (0u32, 0u32, 0u32, 0u32);
@@ -306,8 +313,9 @@ where
                     sy += s.y as u32;
                     n += 1;
                     misses = 0;
-                    // Grow a pip inside the ring so the hold visibly registers.
-                    let grown = 4 + (n * 10 / HOLD_SAMPLES) as u32;
+                    // Disc grows with progress: the hold is visibly going
+                    // somewhere rather than just being amber.
+                    let grown = 4 + (n * 12 / HOLD_SAMPLES);
                     let _ = Circle::with_center(at, grown)
                         .into_styled(PrimitiveStyle::with_fill(HOT))
                         .draw(display);
@@ -316,7 +324,7 @@ where
                     misses += 1;
                     if misses > HOLD_MISS_LIMIT {
                         // A real lift: reset and wait for a fresh press.
-                        draw_marker(display, at, BG);
+                        clear_marker(display, at);
                         draw_marker(display, at, INK);
                         continue 'attempt;
                     }
@@ -325,11 +333,26 @@ where
             delay.delay_millis(10);
         }
 
+        // Green confirms acceptance — the exact cue the instructions promise.
+        clear_marker(display, at);
+        let _ = Circle::with_center(at, 20)
+            .into_styled(PrimitiveStyle::with_fill(DONE))
+            .draw(display);
+        delay.delay_millis(280);
+
         while touch.is_touched() {
             delay.delay_millis(10);
         }
         return ((sx / n) as u16, (sy / n) as u16);
     }
+}
+
+/// Erase the whole marker footprint, including a fully grown progress disc.
+fn clear_marker<D: DrawTarget<Color = Rgb565>>(display: &mut D, at: Point) {
+    let _ = display.fill_solid(
+        &Rectangle::new(at - Point::new(14, 14), Size::new(28, 28)),
+        BG,
+    );
 }
 
 fn draw_marker<D: DrawTarget<Color = Rgb565>>(display: &mut D, at: Point, colour: Rgb565) {
