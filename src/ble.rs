@@ -7,6 +7,7 @@
 //! This only listens. It never connects to, pairs with, or transmits to any
 //! device; a passive scan does not even send scan requests.
 
+use esp_hal::delay::Delay;
 use esp_radio::ble::controller::BleConnector;
 
 /// HCI packet indicators.
@@ -15,10 +16,13 @@ const HCI_EVT: u8 = 0x04;
 
 /// Opcodes (OGF/OCF packed little-endian on the wire).
 const OP_RESET: u16 = 0x0C03;
+const OP_SET_EVENT_MASK: u16 = 0x0C01;
+const OP_LE_SET_EVENT_MASK: u16 = 0x2001;
 const OP_LE_SET_SCAN_PARAMS: u16 = 0x200B;
 const OP_LE_SET_SCAN_ENABLE: u16 = 0x200C;
 
 const EVT_LE_META: u8 = 0x3E;
+const EVT_CMD_COMPLETE: u8 = 0x0E;
 const SUBEVT_ADV_REPORT: u8 = 0x02;
 
 /// Company identifier assigned to Apple, as it appears in manufacturer data.
@@ -26,6 +30,11 @@ pub const APPLE_COMPANY_ID: u16 = 0x004C;
 
 /// Apple manufacturer-data types we can name.
 const APPLE_TYPE_FIND_MY: u8 = 0x12;
+/// Find My payload length that marks a *separated* accessory — a tag whose
+/// owner is not nearby. Phones, tablets and laptops taking part in the Find
+/// My network emit the same 0x12 type with a short payload instead, so the
+/// length is what separates "an AirTag" from "somebody's iPhone".
+const APPLE_FIND_MY_TAG_LEN: u8 = 0x19;
 const APPLE_TYPE_NEARBY: u8 = 0x10;
 const APPLE_TYPE_IBEACON: u8 = 0x02;
 const APPLE_TYPE_AIRDROP: u8 = 0x05;
@@ -43,8 +52,11 @@ const UUID_FAST_PAIR: u16 = 0xFE2C;
 /// What a device appears to be, inferred from its advertising data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// Apple Find My network beacon — an AirTag or Find My accessory.
-    FindMy,
+    /// A separated Find My accessory: an AirTag or similar tag.
+    FindMyTag,
+    /// A device taking part in the Find My network — typically an iPhone,
+    /// iPad or Mac, not a tag.
+    FindMyDevice,
     /// Tile tracker.
     Tile,
     /// Samsung Galaxy SmartTag.
@@ -69,7 +81,8 @@ pub enum Kind {
 impl Kind {
     pub fn label(&self) -> &'static str {
         match self {
-            Kind::FindMy => "FIND MY / AirTag",
+            Kind::FindMyTag => "AIRTAG / Find My tag",
+            Kind::FindMyDevice => "Find My device",
             Kind::Tile => "TILE tracker",
             Kind::SmartTag => "GALAXY SmartTag",
             Kind::FastPair => "FastPair/FindMyDev",
@@ -87,9 +100,12 @@ impl Kind {
     /// True for item trackers — the devices worth flagging if one is
     /// following you around.
     pub fn is_tracker(&self) -> bool {
+        // Deliberately excludes FindMyDevice: a phone or laptop broadcasting
+        // Find My is not an item tracker, and counting them would bury a real
+        // tag in a house full of Apple hardware.
         matches!(
             self,
-            Kind::FindMy | Kind::Tile | Kind::SmartTag | Kind::FastPair
+            Kind::FindMyTag | Kind::Tile | Kind::SmartTag | Kind::FastPair
         )
     }
 }
@@ -124,37 +140,88 @@ fn cmd(opcode: u16, params: &[u8], out: &mut [u8]) -> usize {
 }
 
 /// Put the controller into a passive scan.
-pub fn start_scan(ble: &mut BleConnector<'_>) {
+///
+/// Each command is given time to complete and its Command Complete event is
+/// logged: a controller that rejects Set Scan Enable reports a non-zero
+/// status here, which is otherwise silent and looks like "no beacons".
+pub fn start_scan(ble: &mut BleConnector<'_>, delay: &mut Delay) {
     let mut buf = [0u8; 32];
 
     let n = cmd(OP_RESET, &[], &mut buf);
     let _ = ble.write(&buf[..n]);
-    drain(ble);
+    // Reset takes real time; commands sent too early are dropped.
+    delay.delay_millis(200);
+    report(ble, "reset");
 
-    // Passive scan, interval 0x0060 and window 0x0030, public own address,
-    // accept all advertisements.
+    // Enable the LE Meta Event, which carries every advertising report.
+    //
+    // This is the step whose absence looks exactly like an empty room: the
+    // controller scans happily and Set Scan Enable returns success, but the
+    // default event mask after Reset only covers events 0..=44, and LE Meta
+    // is bit 61. Reports are generated and then dropped before the host ever
+    // sees them. The mask is 8 octets, least-significant first, so bit 61
+    // lives in octet 7 as 0x20.
+    let mask = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f];
+    let n = cmd(OP_SET_EVENT_MASK, &mask, &mut buf);
+    let _ = ble.write(&buf[..n]);
+    delay.delay_millis(50);
+    report(ble, "event mask");
+
+    // And within LE, enable the advertising-report sub-event (bit 1).
+    let le_mask = [0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let n = cmd(OP_LE_SET_EVENT_MASK, &le_mask, &mut buf);
+    let _ = ble.write(&buf[..n]);
+    delay.delay_millis(50);
+    report(ble, "le event mask");
+
+    // Passive scan, interval 0x0060 and window 0x0030 in 0.625ms units,
+    // public own address, accept all advertisements.
+    //
+    // Multi-byte HCI parameters are little-endian, so 0x0060 goes out as
+    // 0x60 0x00 -- sending it big-endian asks for a 60x longer interval.
     let params = [0x00, 0x60, 0x00, 0x30, 0x00, 0x00, 0x00];
     let n = cmd(OP_LE_SET_SCAN_PARAMS, &params, &mut buf);
     let _ = ble.write(&buf[..n]);
-    drain(ble);
+    delay.delay_millis(50);
+    report(ble, "scan params");
 
     // Enable, without duplicate filtering: repeat sightings are how signal
     // strength gets refreshed.
     let n = cmd(OP_LE_SET_SCAN_ENABLE, &[0x01, 0x00], &mut buf);
     let _ = ble.write(&buf[..n]);
+    delay.delay_millis(50);
+    report(ble, "scan enable");
+}
+
+/// Drain pending HCI packets, logging any Command Complete status.
+fn report(ble: &mut BleConnector<'_>, what: &str) {
+    let mut buf = [0u8; 257];
+    for _ in 0..8 {
+        let n = ble.next(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        // [type][evt][plen][num_cmd][opcode_lo][opcode_hi][status]
+        if n >= 7 && buf[0] == HCI_EVT && buf[1] == EVT_CMD_COMPLETE {
+            let opcode = u16::from_le_bytes([buf[4], buf[5]]);
+            let status = buf[6];
+            esp_println::println!(
+                "ble: {what} -> opcode {opcode:#06x} status {status:#04x}{}",
+                if status == 0 { " (ok)" } else { " FAILED" }
+            );
+        } else {
+            esp_println::println!("ble: {what} -> event {:02x?}", &buf[..n.min(8)]);
+        }
+    }
 }
 
 pub fn stop_scan(ble: &mut BleConnector<'_>) {
     let mut buf = [0u8; 32];
     let n = cmd(OP_LE_SET_SCAN_ENABLE, &[0x00, 0x00], &mut buf);
     let _ = ble.write(&buf[..n]);
-    drain(ble);
-}
-
-fn drain(ble: &mut BleConnector<'_>) {
-    let mut buf = [0u8; 64];
+    let mut sink = [0u8; 257];
     for _ in 0..8 {
-        if ble.next(&mut buf).unwrap_or(0) == 0 {
+        if ble.next(&mut sink).unwrap_or(0) == 0 {
             break;
         }
     }
@@ -162,8 +229,19 @@ fn drain(ble: &mut BleConnector<'_>) {
 
 /// Read one HCI packet and return an advert if it was an advertising report.
 pub fn poll(ble: &mut BleConnector<'_>) -> Option<Advert> {
+    poll_counted(ble, &mut 0)
+}
+
+/// As [`poll`], but counts every HCI packet seen — including ones that are
+/// not advertising reports. A zero count means the scan never started; a
+/// non-zero count with no adverts means the parsing is at fault.
+pub fn poll_counted(ble: &mut BleConnector<'_>, packets: &mut u32) -> Option<Advert> {
     let mut buf = [0u8; 257];
     let n = ble.next(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    *packets = packets.saturating_add(1);
     if n < 4 || buf[0] != HCI_EVT || buf[1] != EVT_LE_META {
         return None;
     }
@@ -197,8 +275,9 @@ pub fn poll(ble: &mut BleConnector<'_>) -> Option<Advert> {
 
 /// Fields lifted out of an advertising payload.
 struct Parsed {
-    /// Company ID and the first payload byte, which is the sub-type for Apple.
-    mfg: Option<(u16, Option<u8>)>,
+    /// Company ID, then the first two payload bytes. For Apple those are the
+    /// sub-type and its length.
+    mfg: Option<(u16, Option<u8>, Option<u8>)>,
     /// 16-bit service UUIDs, from UUID lists and from service data.
     services: [u16; 8],
     service_count: u8,
@@ -257,6 +336,7 @@ fn parse_ad(data: &[u8]) -> Parsed {
                 p.mfg = Some((
                     u16::from_le_bytes([value[0], value[1]]),
                     value.get(2).copied(),
+                    value.get(3).copied(),
                 ));
             }
             _ => {}
@@ -294,14 +374,20 @@ fn classify(addr: &[u8; 6], p: &Parsed) -> Kind {
     }
 
     match p.mfg {
-        Some((APPLE_COMPANY_ID, sub)) => match sub {
-            Some(APPLE_TYPE_FIND_MY) => Kind::FindMy,
+        Some((APPLE_COMPANY_ID, sub, len)) => match sub {
+            Some(APPLE_TYPE_FIND_MY) => {
+                if len == Some(APPLE_FIND_MY_TAG_LEN) {
+                    Kind::FindMyTag
+                } else {
+                    Kind::FindMyDevice
+                }
+            }
             Some(APPLE_TYPE_NEARBY) => Kind::AppleNearby,
             Some(APPLE_TYPE_IBEACON) => Kind::IBeacon,
             Some(APPLE_TYPE_AIRDROP) => Kind::AirDrop,
             _ => Kind::Apple,
         },
-        Some((company, _)) => Kind::Vendor(company),
+        Some((company, _, _)) => Kind::Vendor(company),
         None => Kind::Plain,
     }
 }

@@ -26,6 +26,10 @@ struct Seen {
     hits: u16,
 }
 
+fn raw_button() -> Rectangle {
+    Rectangle::new(Point::new(W - 112, 4), Size::new(52, 22))
+}
+
 pub fn run<D, SPI, IRQ>(
     display: &mut D,
     touch: &mut Xpt2046<SPI, IRQ>,
@@ -38,6 +42,8 @@ pub fn run<D, SPI, IRQ>(
     IRQ: embedded_hal::digital::InputPin,
 {
     let back = ui::header(display, "BLE SCAN");
+    let mut raw_mode = false;
+    ui::button(display, raw_button(), "RAW", DIM);
     ui::clear_body(display);
     let _ = Text::new(
         "listening for beacons...",
@@ -46,16 +52,21 @@ pub fn run<D, SPI, IRQ>(
     )
     .draw(display);
 
-    ble::start_scan(ble_conn);
+    ble::start_scan(ble_conn, delay);
 
     let mut seen: heapless::Vec<Seen, MAX_SEEN> = heapless::Vec::new();
     let mut trackers: u16 = 0;
     let mut ticks: u32 = 0;
+    // Counts every HCI packet, advert or not. Zero means the scan never
+    // started, which looks identical on screen to "nothing is nearby".
+    let mut packets: u32 = 0;
 
     loop {
         // Drain whatever the controller has queued.
         for _ in 0..16 {
-            let Some(adv) = ble::poll(ble_conn) else { break };
+            let Some(adv) = ble::poll_counted(ble_conn, &mut packets) else {
+                break;
+            };
             match seen.iter_mut().find(|s| s.adv.addr == adv.addr) {
                 Some(s) => {
                     s.adv = adv;
@@ -89,7 +100,8 @@ pub fn run<D, SPI, IRQ>(
         ticks += 1;
         if ticks % 8 == 0 {
             seen.sort_unstable_by(|a, b| b.adv.rssi.cmp(&a.adv.rssi));
-            render(display, &seen, trackers);
+            render(display, &seen, trackers, packets, raw_mode);
+            ui::button(display, raw_button(), if raw_mode { "CLASS" } else { "RAW" }, DIM);
         }
 
         if let Some(s) = touch.sample() {
@@ -101,6 +113,13 @@ pub fn run<D, SPI, IRQ>(
                 ui::wait_release(touch, delay);
                 return;
             }
+            if ui::hit(raw_button(), p) {
+                raw_mode = !raw_mode;
+                ui::flash(display, raw_button(), delay);
+                ui::wait_release(touch, delay);
+                render(display, &seen, trackers, packets, raw_mode);
+                ui::button(display, raw_button(), if raw_mode { "CLASS" } else { "RAW" }, DIM);
+            }
         }
         delay.delay_millis(25);
     }
@@ -108,24 +127,36 @@ pub fn run<D, SPI, IRQ>(
 
 fn kind_colour(k: Kind) -> Rgb565 {
     match k {
-        Kind::FindMy => BAD, // deliberately loud: this is the interesting one
+        Kind::FindMyTag => BAD, // deliberately loud: this is the interesting one
+        Kind::FindMyDevice => DIM, // a phone or laptop, not a tag
         Kind::AppleNearby | Kind::AirDrop | Kind::Apple => HOT,
         Kind::IBeacon => GOOD,
         _ => DIM,
     }
 }
 
-fn render<D: DrawTarget<Color = Rgb565>>(display: &mut D, seen: &[Seen], trackers: u16) {
+fn render<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    seen: &[Seen],
+    trackers: u16,
+    packets: u32,
+    raw_mode: bool,
+) {
     let body = Rectangle::new(
         Point::new(0, ui::HEADER_H),
         Size::new(W as u32, (ui::H - ui::HEADER_H) as u32),
     );
     let _ = display.fill_solid(&body, BG);
 
-    let mut head: String<40> = String::new();
+    let mut head: String<48> = String::new();
     let _ = core::fmt::Write::write_fmt(
         &mut head,
-        format_args!("{} devices   {} Find My", seen.len(), trackers),
+        format_args!(
+            "{} dev  {} findmy  {} hci",
+            seen.len(),
+            trackers,
+            packets
+        ),
     );
     let _ = Text::new(
         head.as_str(),
@@ -133,6 +164,18 @@ fn render<D: DrawTarget<Color = Rgb565>>(display: &mut D, seen: &[Seen], tracker
         ui::body_style(if trackers > 0 { BAD } else { INK }),
     )
     .draw(display);
+
+    // Nothing at all, and no HCI traffic either: say so, rather than showing
+    // an empty list that looks like a quiet room.
+    if seen.is_empty() && packets == 0 {
+        let _ = Text::new(
+            "no HCI packets - scan not running",
+            Point::new(6, ui::HEADER_H + 28),
+            ui::body_style(BAD),
+        )
+        .draw(display);
+        return;
+    }
 
     for (i, s) in seen.iter().take(VISIBLE).enumerate() {
         let y = ui::HEADER_H + 24 + i as i32 * ROW_H;
@@ -155,6 +198,18 @@ fn render<D: DrawTarget<Color = Rgb565>>(display: &mut D, seen: &[Seen], tracker
             ),
         );
         let _ = Text::new(line.as_str(), Point::new(6, y + 8), ui::body_style(INK)).draw(display);
+
+        // In raw mode every device is listed plainly, with no classification
+        // and no filtering — useful when the classifier is the suspect.
+        if raw_mode {
+            let mut r: String<48> = String::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut r,
+                format_args!("  seen x{}  {}", s.hits, if s.adv.random_addr { "random" } else { "public" }),
+            );
+            let _ = Text::new(r.as_str(), Point::new(6, y + 17), ui::body_style(DIM)).draw(display);
+            continue;
+        }
 
         // Second line: what it looks like, and its name if it gave one.
         let mut meta: String<48> = String::new();
