@@ -34,9 +34,13 @@ espflash flash --chip esp32 --port /dev/ttyUSB0 --baud 115200 \
 
 - Flash at **115200** and use the **default stub**. `--no-stub` fails on this
   board with an error on the `FlashEnd` command.
+- The `--port` above is the Linux name. On macOS it is `/dev/cu.usbserial-XXXX`
+  or `/dev/cu.wchusbserial*` — discover it with `ls /dev/cu.*`. Setting
+  `export ESPFLASH_PORT=<device>` once avoids editing the command and stops
+  `espflash` prompting interactively (which blocks a non-interactive agent).
 - To read the serial log, add `--monitor`, or connect at 115200. Only **one**
-  process may hold `/dev/ttyUSB0` — a stray monitor makes `espflash` panic with
-  a slice-index error. Check with `fuser /dev/ttyUSB0`.
+  process may hold the port — a stray monitor makes `espflash` panic with a
+  slice-index error. Find it with `lsof <device>` (`fuser` on Linux).
 - There is no host-side test suite: this is embedded firmware. "Verify" means
   flashing to hardware and reading the serial log or the screen. Do not claim a
   change works without doing so, and say plainly when you could not.

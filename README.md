@@ -70,13 +70,17 @@ espflash flash --chip esp32 --port /dev/ttyUSB0 --baud 115200 \
     target/xtensa-esp32-none-elf/release/cyd-rust
 ```
 
-- Adjust `--port` to your serial device (`/dev/ttyUSB0`, `/dev/ttyACM0`,
-  `COMx`). The board's CH340 USB-UART enumerates without extra drivers on modern
-  systems.
+- Set `--port` to your serial device. The board's CH340 USB-UART enumerates as
+  `/dev/ttyUSB0` on Linux, `/dev/cu.usbserial-XXXX` (or `cu.wchusbserial*`) on
+  macOS — find it with `ls /dev/cu.*` — and `COMx` on Windows. Modern macOS
+  (Big Sur and later) ships the CH34x driver, so no driver install is needed.
+  You can also `export ESPFLASH_PORT=<device>` once and drop the flag, which is
+  the tidiest option for a non-interactive agent (otherwise `espflash` prompts
+  for a port).
 - Flash at **115200** with the **default flash stub**. `--no-stub` fails on this
   board with an error on the `FlashEnd` command.
 - Add `--monitor` to open the serial log after flashing (115200 8N1). Only one
-  process may hold the port at a time.
+  process may hold the port at a time; find a straggler with `lsof <device>`.
 
 `cargo run --release` builds, flashes and monitors in one step, via the runner
 in `.cargo/config.toml`.
@@ -134,7 +138,9 @@ transfers: reads above ~64 KB fail at any baud rate, so dump flash in 64 KB
 chunks. A ~600 KB firmware image writes fine. Use `espflash`'s default stub —
 `--no-stub` fails here with an error on the `FlashEnd` command. Anything holding
 the serial port open (a monitor, a logging script) makes `espflash` panic with a
-confusing slice-index error; check with `fuser /dev/ttyUSB0`.
+confusing slice-index error; find the offender with `fuser /dev/ttyUSB0` (or
+`lsof` on any platform). This section is WSL-only — on a native Linux, macOS,
+or Windows host the USB is direct and none of it applies.
 
 ## Credits and legality
 
