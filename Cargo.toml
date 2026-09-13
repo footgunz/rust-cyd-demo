@@ -13,6 +13,11 @@ path = "./src/bin/main.rs"
 name = "touch-probe"
 path = "./src/bin/touch_probe.rs"
 
+# Hardware diagnostic: reads the on-board light sensor.
+[[bin]]
+name = "sensor-probe"
+path = "./src/bin/sensor_probe.rs"
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32", "unstable"] }
 esp-println = { version = "0.17.0", features = ["esp32"] }
@@ -22,6 +27,7 @@ esp-backtrace = { version = "0.19.0", features = ["esp32", "panic-handler", "pri
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
 
 critical-section = "1.2.0"
+nb                = "1.1.0"
 
 # Display stack for the CYD's 2.8" ILI9341 panel
 embedded-graphics = "0.8.2"
