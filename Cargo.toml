@@ -8,15 +8,6 @@ version      = "0.1.0"
 name = "cyd-rust"
 path = "./src/bin/main.rs"
 
-# Hardware diagnostic: dumps raw XPT2046 channels and the PENIRQ line.
-[[bin]]
-name = "touch-probe"
-path = "./src/bin/touch_probe.rs"
-
-# Hardware diagnostic: reads the on-board light sensor.
-[[bin]]
-name = "sensor-probe"
-path = "./src/bin/sensor_probe.rs"
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32", "unstable"] }
@@ -28,6 +19,12 @@ esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
 
 critical-section = "1.2.0"
 nb                = "1.1.0"
+
+# Wi-Fi. esp-radio needs a heap and a scheduler; esp-rtos supplies the latter.
+esp-alloc       = "0.10.0"
+esp-rtos        = { version = "0.3.0", features = ["esp-alloc", "esp-radio", "esp32"] }
+esp-radio       = { version = "0.18.0", features = ["esp-alloc", "esp32", "unstable", "wifi", "ble", "coex"] }
+embassy-futures = "0.1.2"
 
 # Display stack for the CYD's 2.8" ILI9341 panel
 embedded-graphics = "0.8.2"
