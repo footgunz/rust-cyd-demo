@@ -79,17 +79,18 @@ espflash flash --chip esp32 --port /dev/ttyUSB0 --baud 115200 \
   reaches state through the `critical_section`-guarded static in `src/flock.rs`.
   Do the minimum in the callback; draw from a snapshot in the app.
 
-## Hardware quirks specific to the reference unit
+## Hardware quirks
 
-Verified empirically, not from the datasheet. See `README.md` for the full list,
-but the load-bearing ones for code:
+Verified empirically, not from the datasheet. See `README.md` for the pinout;
+the load-bearing ones for code:
 
 - Panel is **BGR** and horizontally **mirrored** — needs `ColorOrder::Bgr` and
   `Orientation::new().flip_horizontal()`.
 - Touch axes are **transposed** vs the display — three-point calibration.
-- Red LED (GPIO 4), the LDR (GPIO 34), and the internal Hall/temp sensors are
-  **absent or nonfunctional** on this unit. Don't add features that depend on
-  them without checking; the ADC/light-sensor was proven dead by experiment.
+- Board revisions vary in what's populated (LDR, RGB channels), and individual
+  units have defects. Prove a peripheral works on the actual board before
+  building a feature on it — don't trust the pinout alone. Diagnostic screens
+  (TOUCH DIAG, ANALOG) exist for exactly this.
 
 ## Conventions
 
