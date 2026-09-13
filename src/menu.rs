@@ -14,24 +14,26 @@ pub enum Choice {
     Paint,
     WifiScan,
     BleScan,
+    Flock,
     TouchDiag,
     Analog,
     Leds,
     Calibrate,
 }
 
-const ITEMS: [(Choice, &str, &str); 7] = [
+const ITEMS: [(Choice, &str, &str); 8] = [
     (Choice::Paint, "PAINT", "pressure-sensitive drawing"),
     (Choice::WifiScan, "WIFI SCAN", "nearby access points"),
     (Choice::BleScan, "BLE SCAN", "beacons and item trackers"),
+    (Choice::Flock, "FLOCK DETECT", "ALPR surveillance cameras"),
     (Choice::TouchDiag, "TOUCH DIAG", "live raw touch values"),
     (Choice::Analog, "ANALOG", "ADC inputs"),
     (Choice::Leds, "LEDS", "RGB channel control"),
     (Choice::Calibrate, "CALIBRATE", "redo touch calibration"),
 ];
 
-const TOP: i32 = 46;
-const ROW_H: i32 = 36;
+const TOP: i32 = 42;
+const ROW_H: i32 = 32;
 const GAP: i32 = 2;
 
 fn row(i: usize) -> Rectangle {

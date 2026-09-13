@@ -131,7 +131,7 @@ fn main() -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    let (mut wifi, _interfaces) =
+    let (mut wifi, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("wifi init");
     // Station mode with no SSID: enough to scan, never associates.
     wifi.set_config(&WifiConfig::Station(StationConfig::default()))
@@ -154,6 +154,14 @@ fn main() -> ! {
             Choice::BleScan => {
                 apps::blescan::run(&mut display, &mut touch, &mut delay, cal, &mut ble)
             }
+            Choice::Flock => apps::flock::run(
+                &mut display,
+                &mut touch,
+                &mut delay,
+                cal,
+                &mut wifi,
+                &mut interfaces.sniffer,
+            ),
             Choice::TouchDiag => apps::touchdiag::run(&mut display, &mut touch, &mut delay, cal),
             Choice::Analog => {
                 // The ADC needs concrete esp-hal types, so the app reaches it

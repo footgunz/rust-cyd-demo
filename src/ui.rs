@@ -3,7 +3,9 @@
 //! Every screen is built from these pieces so the apps stay consistent and
 //! none of them has to re-derive layout constants.
 
-use embedded_graphics::mono_font::{ascii::FONT_6X10, ascii::FONT_9X15_BOLD, MonoTextStyle};
+use embedded_graphics::mono_font::{
+    ascii::FONT_6X10, ascii::FONT_9X15_BOLD, MonoTextStyle, MonoTextStyleBuilder,
+};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
@@ -36,6 +38,24 @@ pub fn title_style() -> MonoTextStyle<'static, Rgb565> {
 pub fn body_style(colour: Rgb565) -> MonoTextStyle<'static, Rgb565> {
     MonoTextStyle::new(&FONT_6X10, colour)
 }
+
+/// Body text that paints its own background.
+///
+/// Redrawing changing text by clearing the area first and then drawing makes
+/// the region visibly blink. An opaque style overwrites the glyph cells in
+/// place instead, so a row can update without any flash — provided the string
+/// is padded to a constant width, or leftovers from a longer previous string
+/// survive underneath.
+pub fn body_style_opaque(colour: Rgb565) -> MonoTextStyle<'static, Rgb565> {
+    MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(colour)
+        .background_color(BG)
+        .build()
+}
+
+/// FONT_6X10 glyphs are 6px wide, so this many fill the 240px width.
+pub const COLS: usize = 39;
 
 pub fn hit(r: Rectangle, p: Point) -> bool {
     let tl = r.top_left;

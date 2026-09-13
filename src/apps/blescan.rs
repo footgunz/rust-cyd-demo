@@ -22,9 +22,39 @@ const ROW_H: i32 = 22;
 const VISIBLE: usize = 9;
 const LIST_TOP: i32 = ui::HEADER_H + 20;
 
-/// Ticks (~25ms each) without a sighting before a device counts as stale and
-/// may be evicted to make room.
-const STALE_TICKS: u32 = 1200;
+// Ticks are ~25ms. How long since the last sighting before a device is
+// considered fading, then gone. A device that has gone quiet stays in the
+// list rather than vanishing, so a beacon that drops in and out keeps its
+// slot instead of appearing to be a new device each time.
+const IDLE_TICKS: u32 = 120; // ~3s
+const GONE_TICKS: u32 = 600; // ~15s
+
+/// Presence of a device, from how recently it was last heard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Here,
+    Fading,
+    Gone,
+}
+
+impl Presence {
+    fn from_age(age: u32) -> Self {
+        if age < IDLE_TICKS {
+            Presence::Here
+        } else if age < GONE_TICKS {
+            Presence::Fading
+        } else {
+            Presence::Gone
+        }
+    }
+    fn marker(self) -> char {
+        match self {
+            Presence::Here => '*',
+            Presence::Fading => '-',
+            Presence::Gone => 'x',
+        }
+    }
+}
 
 struct Seen {
     adv: Advert,
@@ -34,9 +64,10 @@ struct Seen {
     /// would jitter constantly without this.
     rssi_avg: i16,
     last_tick: u32,
-    /// Set when the rendered text would change, so untouched rows are left
-    /// alone instead of being cleared and redrawn into the same pixels.
-    dirty: bool,
+    /// Last text actually drawn for this row. Redrawing is driven by
+    /// comparing against these rather than by guessing what changed.
+    l1: String<48>,
+    l2: String<48>,
 }
 
 impl Seen {
@@ -46,20 +77,20 @@ impl Seen {
             adv,
             hits: 1,
             last_tick: tick,
-            dirty: true,
+            l1: String::new(),
+            l2: String::new(),
         }
     }
 
+    fn presence(&self, tick: u32) -> Presence {
+        Presence::from_age(tick.saturating_sub(self.last_tick))
+    }
+
     fn update(&mut self, adv: Advert, tick: u32) {
-        let before = self.rssi_avg;
         // Weighted towards history: four-sample time constant.
         self.rssi_avg = (self.rssi_avg * 3 + adv.rssi as i16) / 4;
         self.hits = self.hits.saturating_add(1);
         self.last_tick = tick;
-        // Only a visible change is worth a redraw.
-        if self.rssi_avg != before || self.adv.kind != adv.kind {
-            self.dirty = true;
-        }
         self.adv = adv;
     }
 }
@@ -126,8 +157,9 @@ pub fn run<D, SPI, IRQ>(
                             adv.kind.label()
                         );
                     }
-                    if seen.len() == MAX_SEEN {
-                        evict(&mut seen, tick);
+                    if seen.len() == MAX_SEEN && !evict(&mut seen, tick) {
+                        // Everything on screen is still live; keep it.
+                        continue;
                     }
                     let _ = seen.push(Seen::new(adv, tick));
                 }
@@ -142,6 +174,7 @@ pub fn run<D, SPI, IRQ>(
                 trackers,
                 packets,
                 raw_mode,
+                tick,
                 &mut drawn_rows,
                 &mut last_head,
             );
@@ -168,7 +201,7 @@ pub fn run<D, SPI, IRQ>(
                 ui::wait_release(touch, delay);
                 // Every row's second line changes meaning in the other mode.
                 for s in seen.iter_mut() {
-                    s.dirty = true;
+                    s.l2.clear();
                 }
             }
         }
@@ -176,33 +209,35 @@ pub fn run<D, SPI, IRQ>(
     }
 }
 
-/// Make room, preferring to drop a stale non-tracker over anything else.
+/// Make room for a new device, if anything can fairly be dropped.
+///
+/// Only devices that have gone are candidates: a beacon that drops in and
+/// out should keep its slot and be marked, not be evicted and then reappear
+/// as a new entry. Trackers are dropped last. Returns false when everything
+/// present is still worth keeping, in which case the new device is ignored
+/// until a slot frees up.
 ///
 /// `remove` rather than `swap_remove`: swapping would move an unrelated
 /// device into the freed slot and visibly reshuffle the list.
-fn evict(seen: &mut heapless::Vec<Seen, MAX_SEEN>, tick: u32) {
+fn evict(seen: &mut heapless::Vec<Seen, MAX_SEEN>, tick: u32) -> bool {
     let victim = seen
         .iter()
         .enumerate()
-        .filter(|(_, s)| !s.adv.kind.is_tracker())
-        .filter(|(_, s)| tick.saturating_sub(s.last_tick) > STALE_TICKS)
-        .min_by_key(|(_, s)| s.rssi_avg)
-        // Nothing stale: fall back to the weakest non-tracker, then anything.
-        .or_else(|| {
-            seen.iter()
-                .enumerate()
-                .filter(|(_, s)| !s.adv.kind.is_tracker())
-                .min_by_key(|(_, s)| s.rssi_avg)
-        })
-        .or_else(|| seen.iter().enumerate().min_by_key(|(_, s)| s.rssi_avg))
+        .filter(|(_, s)| s.presence(tick) == Presence::Gone)
+        .min_by_key(|(_, s)| (s.adv.kind.is_tracker(), s.last_tick))
         .map(|(i, _)| i);
 
-    if let Some(i) = victim {
-        seen.remove(i);
-        // Everything below shifted up a slot.
-        for s in seen.iter_mut().skip(i) {
-            s.dirty = true;
+    match victim {
+        Some(i) => {
+            seen.remove(i);
+            // Everything below shifted up a slot; force those rows to redraw.
+            for s in seen.iter_mut().skip(i) {
+                s.l1.clear();
+                s.l2.clear();
+            }
+            true
         }
+        None => false,
     }
 }
 
@@ -224,24 +259,26 @@ fn render<D: DrawTarget<Color = Rgb565>>(
     trackers: u16,
     packets: u32,
     raw_mode: bool,
+    tick: u32,
     drawn_rows: &mut usize,
     last_head: &mut String<48>,
 ) {
     // Header line, redrawn only when its text changes.
     let mut head: String<48> = String::new();
+    let here = seen
+        .iter()
+        .filter(|s| s.presence(tick) != Presence::Gone)
+        .count();
     let _ = core::fmt::Write::write_fmt(
         &mut head,
-        format_args!("{} dev  {} tags  {} hci", seen.len(), trackers, packets),
+        format_args!("{here}/{} dev  {trackers} tags  {packets} hci", seen.len()),
     );
     if head != *last_head {
-        let _ = display.fill_solid(
-            &Rectangle::new(Point::new(0, ui::HEADER_H), Size::new(W as u32, 16)),
-            BG,
-        );
+        pad(&mut head);
         let _ = Text::new(
             head.as_str(),
-            Point::new(6, ui::HEADER_H + 12),
-            ui::body_style(if trackers > 0 { BAD } else { INK }),
+            Point::new(3, ui::HEADER_H + 12),
+            ui::body_style_opaque(if trackers > 0 { BAD } else { INK }),
         )
         .draw(display);
         *last_head = head;
@@ -253,26 +290,24 @@ fn render<D: DrawTarget<Color = Rgb565>>(
         let _ = Text::new(
             "no HCI packets - scan not running",
             Point::new(6, LIST_TOP + 10),
-            ui::body_style(BAD),
+            ui::body_style_opaque(BAD),
         )
         .draw(display);
         return;
     }
 
     for (i, s) in seen.iter_mut().take(VISIBLE).enumerate() {
-        if !s.dirty {
-            continue;
-        }
-        let r = row_rect(i);
-        let _ = display.fill_solid(&r, BG);
-        let y = r.top_left.y;
+        let y = LIST_TOP + i as i32 * ROW_H;
+        let presence = s.presence(tick);
+        let gone = presence == Presence::Gone;
         let a = s.adv.addr;
 
-        let mut line: String<48> = String::new();
+        let mut l1: String<48> = String::new();
         let _ = core::fmt::Write::write_fmt(
-            &mut line,
+            &mut l1,
             format_args!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}{} {:>4}",
+                "{} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}{} {:>4}",
+                presence.marker(),
                 a[5],
                 a[4],
                 a[3],
@@ -283,43 +318,56 @@ fn render<D: DrawTarget<Color = Rgb565>>(
                 s.rssi_avg
             ),
         );
-        let _ = Text::new(line.as_str(), Point::new(6, y + 9), ui::body_style(INK)).draw(display);
 
-        let mut meta: String<48> = String::new();
+        let mut l2: String<48> = String::new();
         if raw_mode {
             // No classification and no filtering: useful when the classifier
             // itself is the suspect.
             let _ = core::fmt::Write::write_fmt(
-                &mut meta,
+                &mut l2,
                 format_args!(
-                    "  x{}  {}",
+                    "   x{}  {}",
                     s.hits,
                     if s.adv.random_addr { "random" } else { "public" }
                 ),
             );
-            let _ = Text::new(meta.as_str(), Point::new(6, y + 18), ui::body_style(DIM))
-                .draw(display);
         } else {
             let name = s.adv.name_str();
             if name.is_empty() {
                 let _ = core::fmt::Write::write_fmt(
-                    &mut meta,
-                    format_args!("  {} x{}", s.adv.kind.label(), s.hits),
+                    &mut l2,
+                    format_args!("   {} x{}", s.adv.kind.label(), s.hits),
                 );
             } else {
                 let _ = core::fmt::Write::write_fmt(
-                    &mut meta,
-                    format_args!("  {} {}", s.adv.kind.label(), name),
+                    &mut l2,
+                    format_args!("   {} {}", s.adv.kind.label(), name),
                 );
             }
+        }
+        pad(&mut l1);
+        pad(&mut l2);
+
+        // Opaque text overwrites in place, so a changed row never blinks.
+        if l1 != s.l1 {
             let _ = Text::new(
-                meta.as_str(),
-                Point::new(6, y + 18),
-                ui::body_style(kind_colour(s.adv.kind)),
+                l1.as_str(),
+                Point::new(3, y + 9),
+                ui::body_style_opaque(if gone { DIM } else { INK }),
             )
             .draw(display);
+            s.l1 = l1;
         }
-        s.dirty = false;
+        if l2 != s.l2 {
+            let colour = if gone { DIM } else { kind_colour(s.adv.kind) };
+            let _ = Text::new(
+                l2.as_str(),
+                Point::new(3, y + 18),
+                ui::body_style_opaque(colour),
+            )
+            .draw(display);
+            s.l2 = l2;
+        }
     }
 
     // Clear any rows left behind when the list shrinks.
@@ -328,4 +376,14 @@ fn render<D: DrawTarget<Color = Rgb565>>(
         let _ = display.fill_solid(&row_rect(i), BG);
     }
     *drawn_rows = now;
+}
+
+/// Pad to a constant width so an opaque redraw fully covers whatever was
+/// underneath; a shorter new string would otherwise leave stale characters.
+fn pad(s: &mut String<48>) {
+    while s.len() < ui::COLS {
+        if s.push(' ').is_err() {
+            break;
+        }
+    }
 }

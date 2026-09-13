@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod apps;
 pub mod ble;
 pub mod calib;
+pub mod flock;
 pub mod menu;
 pub mod touch;
 pub mod ui;

@@ -23,7 +23,7 @@ nb                = "1.1.0"
 # Wi-Fi. esp-radio needs a heap and a scheduler; esp-rtos supplies the latter.
 esp-alloc       = "0.10.0"
 esp-rtos        = { version = "0.3.0", features = ["esp-alloc", "esp-radio", "esp32"] }
-esp-radio       = { version = "0.18.0", features = ["esp-alloc", "esp32", "unstable", "wifi", "ble", "coex"] }
+esp-radio       = { version = "0.18.0", features = ["esp-alloc", "esp32", "unstable", "wifi", "ble", "coex", "sniffer"] }
 embassy-futures = "0.1.2"
 
 # Display stack for the CYD's 2.8" ILI9341 panel

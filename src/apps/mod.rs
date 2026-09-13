@@ -7,6 +7,7 @@
 
 pub mod analog;
 pub mod blescan;
+pub mod flock;
 pub mod leds;
 pub mod paint;
 pub mod touchdiag;
